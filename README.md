@@ -16,12 +16,19 @@ App web para controlar a entrega de kits natalinos em vários pontos da empresa 
 ## Estrutura
 | Arquivo | Conteúdo |
 | --- | --- |
-| `index.html` | O app completo (HTML, CSS e JS num arquivo) |
+| `index.html` | O app completo (HTML, CSS e JS num arquivo), versão Firebase |
+| `firestore.rules` | Regras de segurança do banco (cole no console do Firebase) |
+| `docs/FIREBASE.md` | Passo a passo para colocar no ar |
+| `docs/versao-claude-ai.html` | Versão para rodar no claude.ai |
 | `docs/ARQUITETURA.md` | Coleções do banco, dependências e como migrar |
 | `docs/PROMPT.md` | Prompt padrão para criar novos sistemas de entrega |
 
-## Como roda hoje
-O app está publicado como Artifact no claude.ai e usa o banco em tempo real da plataforma (`claude.use('db')`, `'user'`, `'downloads'`). **Aberto direto no navegador, ele não carrega os dados.** Para rodar em servidor próprio, troque essa camada por Firebase (Firestore + Auth) ou Supabase. O passo a passo está em `docs/ARQUITETURA.md`.
+## Como roda
+O app roda no **GitHub Pages** e usa o **Firebase** (Firestore para os dados e Authentication para o login). Não precisa de conta Claude.
+
+Antes de abrir o link, siga **[docs/FIREBASE.md](docs/FIREBASE.md)**: criar o projeto, preencher `FIREBASE_CONFIG` no `index.html`, publicar as regras de `firestore.rules` e criar o administrador.
+
+A versão que roda dentro do claude.ai (com o banco da própria plataforma) está em `docs/versao-claude-ai.html`.
 
 ## Segurança
-Hoje as senhas (PBKDF2 + salt) e as permissões são validadas no navegador. Isso basta para controle interno. Numa versão em servidor próprio, mova a autenticação e as regras para o backend.
+Os logins são do Firebase Authentication, e as permissões são validadas pelas regras do Firestore (`firestore.rules`), no servidor. A interface esconde o que o usuário não pode usar, mas quem decide é a regra.

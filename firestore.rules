@@ -1,0 +1,86 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ----- funções auxiliares -----
+    function signedIn() { return request.auth != null; }
+    function me() { return get(/databases/$(database)/documents/usuarios/$(request.auth.uid)).data; }
+    function activeUser() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/usuarios/$(request.auth.uid))
+        && me().ativo != false;
+    }
+    function isAdmin() { return activeUser() && me().perfilId == 'admin'; }
+    function can(p) {
+      return isAdmin() || (activeUser()
+        && get(/databases/$(database)/documents/perfis/$(me().perfilId)).data.permissoes[p] == true);
+    }
+    function bootstrapped() { return exists(/databases/$(database)/documents/config/bootstrap); }
+
+    // ----- configuração inicial (primeiro acesso) -----
+    match /config/bootstrap {
+      allow read: if true;                          // só indica se o sistema já foi configurado
+      allow create: if signedIn() && !bootstrapped();
+      allow update, delete: if false;
+    }
+
+    // ----- níveis de acesso -----
+    match /perfis/{id} {
+      allow read: if activeUser();
+      allow create, update: if (signedIn() && !bootstrapped()) || can('perfis');
+      allow delete: if false;
+    }
+
+    // ----- usuários -----
+    match /usuarios/{uid} {
+      allow read: if signedIn() && (request.auth.uid == uid || activeUser());
+      allow create: if (signedIn() && request.auth.uid == uid && !bootstrapped()
+                        && request.resource.data.perfilId == 'admin')
+                    || can('usuarios');
+      allow update: if can('usuarios')
+                    || (request.auth.uid == uid
+                        && request.resource.data.perfilId == resource.data.perfilId
+                        && request.resource.data.ativo == resource.data.ativo);
+      allow delete: if false;                       // desative em vez de apagar
+    }
+
+    // ----- pontos de entrega -----
+    match /locais/{id} {
+      allow read: if activeUser();
+      allow create, update: if can('pontos');
+      allow delete: if false;
+    }
+
+    // ----- colaboradores (lista do kit) -----
+    match /colaboradores/{id} {
+      allow read: if activeUser();
+      allow write: if can('colaboradores');
+    }
+
+    // ----- trava de matrícula (um kit por pessoa) -----
+    match /matriculas/{id} {
+      allow read: if activeUser();
+      allow create: if can('entregar');
+      allow update: if false;
+      allow delete: if can('estornar');
+    }
+
+    // ----- livro-razão de movimentos -----
+    match /movimentos/{id} {
+      allow read: if activeUser();
+      allow create: if activeUser()
+        && request.resource.data.por == request.auth.uid
+        && ((request.resource.data.tipo == 'entrega' && can('entregar'))
+          || (request.resource.data.tipo == 'transf' && can('transferir'))
+          || ((request.resource.data.tipo == 'entrada' || request.resource.data.tipo == 'ajuste') && can('estoque'))
+          || (request.resource.data.tipo == 'estorno' && can('estornar')));
+      // só o estorno pode mexer, e só nos campos de estorno
+      allow update: if can('estornar')
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['estornado', 'estornadoPor', 'estornadoEm']);
+      allow delete: if false;                       // nada é apagado
+    }
+
+    // tudo que não está listado acima é negado
+  }
+}

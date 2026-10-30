@@ -166,6 +166,9 @@ input:focus,select:focus,textarea:focus,button:focus-visible,a:focus-visible{out
 <div id="toast" hidden></div>
 <div id="sheetHost"></div>
 
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
 <script>
 (() => {
 const MANUAL_URL='https://claude.ai/artifact/4nYN6kKm1GcFhhLrHBHBDS';
@@ -203,7 +206,7 @@ const IC={
 const icon=k=>`<svg class="ic" viewBox="0 0 24 24" aria-hidden="true">${IC[k]||''}</svg>`;
 const LOGO=`<svg viewBox="0 0 32 32" aria-hidden="true"><rect x="4" y="11" width="24" height="17" rx="2" fill="var(--red)"/><rect x="14" y="11" width="4" height="17" fill="var(--yellow)"/><rect x="2.5" y="8" width="27" height="5" rx="1.5" fill="var(--red)" stroke="var(--band)" stroke-width="1"/><rect x="14" y="8" width="4" height="5" fill="var(--yellow)"/><path d="M16 8c-2-5-8-5-7-2 .6 1.8 4.5 2 7 2zm0 0c2-5 8-5 7-2-.6 1.8-4.5 2-7 2z" fill="none" stroke="var(--yellow)" stroke-width="1.8"/></svg>`;
 
-const S={db:null,user:null,platId:null,readOnly:false,me:null,view:null,sub:'pontos',
+const S={auth:null,unsubs:[],setupInProgress:false,bootstrapped:null,db:null,user:null,platId:null,readOnly:false,me:null,view:null,sub:'pontos',
   locais:new Map(),usuarios:new Map(),perfis:new Map(),colabs:new Map(),movs:[],
   loaded:{l:false,u:false,p:false,m:false,c:false},editing:null};
 
@@ -292,15 +295,34 @@ function handleWriteErr(e){
   else toast('Não foi possível salvar agora. Verifique a conexão e tente de novo.');
 }
 
-// ---------- boot ----------
-async function boot(){
-  if(!window.claude||!claude.use){$('#bootmsg').textContent='Abra este app pelo link do claude.ai para acessar o banco compartilhado.';return}
-  const [db,user]=await Promise.all([claude.use('db'),claude.use('user')]);
-  if(!db){$('#bootmsg').textContent='Banco indisponível nesta visualização. Entre com sua conta Claude e abra o link novamente.';return}
-  S.db=db;S.user=user;
-  try{S.platId=user?await user.id():null}catch(e){}
-  try{const c=user?await user.can('data.write'):null;if(c===false)S.readOnly=true}catch(e){}
-  const sub=(col,key,fn)=>db.collection(col).onSnapshot(snap=>{fn(snap);S.loaded[key]=true;schedule()},()=>toast('Conexão perdida com o banco. Recarregue a página.'));
+// ---------- backend (Firebase) ----------
+const FIREBASE_CONFIG={apiKey:'COLE_AQUI',authDomain:'COLE_AQUI',projectId:'COLE_AQUI',storageBucket:'COLE_AQUI',messagingSenderId:'COLE_AQUI',appId:'COLE_AQUI'};
+const LOGIN_DOMAIN='sistema-kits.net';
+const loginToEmail=l=>slug(l)+'@'+LOGIN_DOMAIN;
+const configOk=()=>!!FIREBASE_CONFIG.apiKey&&!FIREBASE_CONFIG.apiKey.startsWith('COLE');
+function saveFile(filename,data){
+  const type=filename.endsWith('.xlsx')?'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':'text/csv;charset=utf-8';
+  const url=URL.createObjectURL(new Blob([data],{type}));
+  const a=document.createElement('a');a.href=url;a.download=filename;document.body.appendChild(a);a.click();
+  setTimeout(()=>{URL.revokeObjectURL(url);a.remove()},1500);
+}
+function authMsg(err){
+  const c=(err&&err.code)||'';
+  if(c==='auth/email-already-in-use')return 'Esse login já existe.';
+  if(['auth/wrong-password','auth/user-not-found','auth/invalid-credential','auth/invalid-login-credentials'].includes(c))return 'Login ou senha incorretos.';
+  if(c==='auth/weak-password')return 'A senha precisa ter ao menos 6 caracteres.';
+  if(c==='auth/too-many-requests')return 'Muitas tentativas. Aguarde alguns minutos.';
+  if(c==='auth/network-request-failed')return 'Sem conexão. Verifique a internet.';
+  return null;
+}
+function stopData(){S.unsubs.forEach(f=>{try{f()}catch(e){}});S.unsubs=[];S.loaded={l:false,u:false,p:false,m:false,c:false};}
+function startData(){
+  if(S.unsubs.length)return;
+  const db=S.db;
+  const sub=(col,key,fn)=>{
+    const un=db.collection(col).onSnapshot(snap=>{fn(snap);S.loaded[key]=true;schedule()},()=>{if(S.me)toast('Conexão perdida com o banco. Recarregue a página.')});
+    S.unsubs.push(un);
+  };
   const toMap=s=>new Map(s.docs.map(d=>[d.id,{id:d.id,...d.data()}]));
   sub('locais','l',s=>S.locais=toMap(s));
   sub('usuarios','u',s=>S.usuarios=toMap(s));
@@ -312,34 +334,72 @@ let rafPending=false;
 function schedule(){if(rafPending)return;rafPending=true;requestAnimationFrame(()=>{rafPending=false;refresh()})}
 
 let lastScreen=null;
-function refresh(){
-  if(!Object.values(S.loaded).every(Boolean))return;
-  if(S.me){const f=S.usuarios.get(S.me.id);if(!f||f.ativo===false){logout('Seu usuário foi desativado.');return}S.me=f}
-  else{const sid=store('s','kits_uid');const u=sid&&S.usuarios.get(sid);if(u&&u.ativo!==false)S.me=u}
-  const screen=S.usuarios.size===0?'setup':(!S.me?'login':'app');
-  if(screen!==lastScreen){lastScreen=screen;if(screen==='setup')renderSetup();else if(screen==='login')renderLogin();else renderShell()}
-  else if(screen==='app')updateDyn();
+async function boot(){
+  if(!window.firebase||!configOk()){$('#bootmsg').textContent='Falta preencher a configuração do Firebase no arquivo. Veja docs/FIREBASE.md.';return}
+  firebase.initializeApp(FIREBASE_CONFIG);
+  S.auth=firebase.auth();S.db=firebase.firestore();
+  try{const b=await S.db.doc('config/bootstrap').get();S.bootstrapped=b.exists}
+  catch(e){$('#bootmsg').textContent='Não consegui falar com o banco. Confira a configuração do Firebase e as regras.';return}
+  S.auth.onAuthStateChanged(async u=>{
+    if(S.setupInProgress)return;
+    if(!u){stopData();S.me=null;route();return}
+    try{
+      const d=await S.db.doc('usuarios/'+u.uid).get();
+      if(!d.exists){noAccess();return}
+      if(d.data().ativo===false){await S.auth.signOut();renderLogin('Usuário desativado. Fale com o administrador.');return}
+      startData();
+    }catch(e){noAccess('Não foi possível verificar seu acesso. Tente de novo.')}
+  });
 }
+function route(){
+  const scr=S.bootstrapped===false?'setup':'login';
+  if(lastScreen===scr)return;
+  lastScreen=scr;
+  scr==='setup'?renderSetup():renderLogin();
+}
+function refresh(){
+  if(!S.auth||!S.auth.currentUser)return;
+  if(!Object.values(S.loaded).every(Boolean))return;
+  const me=S.usuarios.get(S.auth.currentUser.uid);
+  if(!me){noAccess();return}
+  if(me.ativo===false){S.auth.signOut();return}
+  S.me=me;
+  if(lastScreen!=='app'){lastScreen='app';renderShell()}else updateDyn();
+}
+function logout(){if(S.auth)S.auth.signOut().catch(()=>{})}
 
 // ---------- acesso ----------
 function loginCard(inner){return `<div class="wrap center"><div class="login panel"><div class="loginhead"><div class="brand">${LOGO}<span>Kits Natalinos<small>Clealco · Natal 2026</small></span></div><button class="hbtn" id="bAp" aria-label="Aparência">Aa</button></div>${inner}</div></div>`}
 function bindLoginAp(){$('#bAp').onclick=()=>openAparencia(window.innerWidth<=760)}
-async function renderSetup(){
-  const owner=S.user?await S.user.isOwner():false;
-  $('#app').innerHTML=loginCard(`<h1>Primeiro acesso</h1>${owner?`<p class="note">Crie o usuário administrador. Ele cadastra pontos, níveis de acesso, usuários e a lista de colaboradores.</p>
+function noAccess(msg){
+  S.me=null;stopData();lastScreen='noaccess';
+  $('#app').innerHTML=loginCard(`<h1>Sem acesso</h1><div class="alert">${h(msg||'Seu login não tem cadastro neste sistema. Peça ao administrador para cadastrar você.')}</div><div class="btns"><button class="btn" id="bOut">Sair</button></div>`);
+  bindLoginAp();$('#bOut').onclick=()=>logout();
+}
+function renderSetup(){
+  $('#app').innerHTML=loginCard(`<h1>Primeiro acesso</h1><p class="note">Crie o administrador do sistema. Ele cadastra pontos, níveis, usuários e colaboradores. Faça isso logo após publicar, antes de divulgar o link.</p>
    <form id="fSetup"><label for="sNome">Nome completo<input id="sNome" required autocomplete="name"></label>
-    <label for="sLogin">Login<input id="sLogin" required autocomplete="username" placeholder="ex.: maria.silva"></label>
+    <label for="sLogin">Login<input id="sLogin" required autocomplete="username" autocapitalize="none" placeholder="ex.: maria.silva"></label>
     <label for="sSenha">Senha (mín. 6 caracteres)<input id="sSenha" type="password" minlength="6" required autocomplete="new-password"></label>
-    <button class="btn">Criar administrador</button></form>`:`<p class="note">O app ainda não foi configurado. Aguarde o administrador criar os acessos.</p>`}`);
+    <div id="sMsg"></div><button class="btn">Criar administrador</button></form>`);
   bindLoginAp();
-  const f=$('#fSetup');if(!f)return;
-  f.onsubmit=async e=>{e.preventDefault();const b=f.querySelector('button');b.disabled=true;
-    try{for(const [id,p] of Object.entries(DEFAULT_PERFIS))await S.db.doc('perfis/'+id).set(p);
-      const login=slug($('#sLogin').value);if(login.length<3){toast('Login precisa ter ao menos 3 letras ou números.');b.disabled=false;return}
-      const salt=newSalt();
-      await S.db.doc('usuarios/'+login).set({nome:$('#sNome').value.trim(),login,salt,hash:await hashPw($('#sSenha').value,salt),perfilId:'admin',localId:null,ativo:true,criadoEm:Date.now()});
-      store('s','kits_uid',login);toast('Administrador criado.');
-    }catch(err){b.disabled=false;handleWriteErr(err)}};
+  $('#fSetup').onsubmit=async e=>{e.preventDefault();
+    const b=e.target.querySelector('button'),msg=t=>$('#sMsg').innerHTML=t?`<div class="alert">${t}</div>`:'';
+    const login=slug($('#sLogin').value);
+    if(login.length<3)return msg('Login precisa ter ao menos 3 letras ou números.');
+    b.disabled=true;S.setupInProgress=true;
+    try{
+      const cred=await S.auth.createUserWithEmailAndPassword(loginToEmail(login),$('#sSenha').value);
+      const uid=cred.user.uid,batch=S.db.batch();
+      for(const [id,p] of Object.entries(DEFAULT_PERFIS))batch.set(S.db.doc('perfis/'+id),p);
+      batch.set(S.db.doc('usuarios/'+uid),{nome:$('#sNome').value.trim(),login,uid,perfilId:'admin',localId:null,ativo:true,criadoEm:Date.now()});
+      batch.set(S.db.doc('config/bootstrap'),{por:uid,criadoEm:Date.now()});
+      await batch.commit();
+      S.bootstrapped=true;S.setupInProgress=false;lastScreen=null;
+      startData();
+      toast('Administrador criado.');
+    }catch(err){S.setupInProgress=false;b.disabled=false;msg(authMsg(err)||'Não foi possível criar o administrador: '+h(err.message||err.code))}
+  };
 }
 function renderLogin(msg){
   $('#app').innerHTML=loginCard(`<h1>Entrar</h1>${msg?`<div class="alert">${h(msg)}</div>`:''}
@@ -348,14 +408,11 @@ function renderLogin(msg){
     <button class="btn">Entrar</button>
     <p class="note">Cada entrega fica registrada com o seu login. Não compartilhe sua senha.</p></form>`);
   bindLoginAp();
-  $('#fLogin').onsubmit=async e=>{e.preventDefault();
-    const u=S.usuarios.get(slug($('#lLogin').value));
-    const ok=u&&u.ativo!==false&&await hashPw($('#lSenha').value,u.salt)===u.hash;
-    if(!ok){renderLogin('Login ou senha incorretos, ou usuário desativado.');return}
-    S.me=u;store('s','kits_uid',u.id);lastScreen='app';S.view=null;updateDyn.key=null;renderShell();
+  $('#fLogin').onsubmit=async e=>{e.preventDefault();const b=e.target.querySelector('button');b.disabled=true;
+    try{await S.auth.signInWithEmailAndPassword(loginToEmail($('#lLogin').value),$('#lSenha').value)}
+    catch(err){renderLogin(authMsg(err)||'Não foi possível entrar. Tente de novo.')}
   };
 }
-function logout(msg){S.me=null;store('s','kits_uid',null);closeSheet();lastScreen='login';renderLogin(msg)}
 
 // ---------- shell ----------
 const VIEWS=[['painel','Painel','painel'],['entregar','Entregar','entregar'],['transferir','Transferir','transferir'],['estoque','Estoque','estoque'],['colaboradores','Colaboradores','colaboradores'],['historico','Histórico','historico'],['cadastros','Cadastros',null]];
@@ -479,14 +536,18 @@ function vEntregar(){
     if(saldoDe(local)<qtd)return msg(`Saldo insuficiente em ${h(nomeLocal(local))}. Lance uma entrada ou peça uma transferência.`);
     const btn=$('#eBtn');btn.disabled=true;
     try{
-      const ref=S.db.doc('matriculas/m-'+matId);
-      const lease=await ref.acquire({holder:S.me.id,ttlMs:8000});
-      if(!lease.acquired){msg('Esta matrícula está sendo registrada agora em outro ponto. Confira em alguns segundos.');return}
-      const cur=await ref.get();const d=cur.exists?cur.data():null;
-      if(d&&d.movId){msg(`A matrícula <b>${h(mat)}</b> já recebeu kit em <b>${h(nomeLocal(d.localId))}</b>, entregue por <b>${h(nomeUser(d.por,d.porNome))}</b> em ${fmtD(d.ts)}.`);return}
       const extra={};if(!c&&S.colabs.size)extra.foraLista=true;if(c&&c.localId&&c.localId!==local)extra.foraPonto=c.localId;if(c&&c.setor)extra.setor=c.setor;
-      const mv=await addMov({tipo:'entrega',origem:local,qtd,colab:$('#eNome').value.trim(),matricula:mat,obs:$('#eObs').value.trim(),...extra});
-      await ref.set({movId:mv.id,localId:local,por:S.me.id,porNome:S.me.nome,ts:Date.now(),matricula:mat});
+      const ts=Date.now(),movRef=S.db.collection('movimentos').doc(),ref=S.db.doc('matriculas/m-'+matId);
+      const mov={tipo:'entrega',origem:local,qtd,colab:$('#eNome').value.trim(),matricula:mat,obs:$('#eObs').value.trim(),...extra,por:S.me.id,porNome:S.me.nome,porLogin:S.me.login,dev:null,ts};
+      // transação: checa a matrícula e grava o movimento de forma atômica (evita entrega dupla em dois pontos)
+      const clash=await S.db.runTransaction(async t=>{
+        const s=await t.get(ref);
+        if(s.exists)return s.data();
+        t.set(movRef,mov);
+        t.set(ref,{movId:movRef.id,localId:local,por:S.me.id,porNome:S.me.nome,ts,matricula:mat});
+        return null;
+      });
+      if(clash){msg(`A matrícula <b>${h(mat)}</b> já recebeu kit em <b>${h(nomeLocal(clash.localId))}</b>, entregue por <b>${h(nomeUser(clash.por,clash.porNome))}</b> em ${fmtD(clash.ts)}.`);return}
       msg('');['eMat','eNome','eObs'].forEach(i=>$('#'+i).value='');$('#eQtd').value=1;$('#eForceChk').checked=false;lastMat='';lookup(false);$('#eMat').focus();
       toast('Entrega registrada para '+mat+'.');
     }catch(err){if(err&&err.code)handleWriteErr(err);else msg('Não foi possível registrar. Tente de novo.')}
@@ -494,6 +555,7 @@ function vEntregar(){
   };
 }
 
+// ---------- TRANSFERIR ----------
 // ---------- TRANSFERIR ----------
 function vTransferir(){
   setView(`<div class="grid2"><section class="panel"><div><h1>Transferir estoque</h1><p class="sub">Sai da origem e entra no destino no mesmo lançamento, com o seu login.</p></div>
@@ -589,7 +651,7 @@ function vColab(){
   $('#cTpl').onclick=async()=>{
     try{const X=await loadXLSX();const ws=X.utils.aoa_to_sheet([['Matrícula','Nome','Setor','Ponto de entrega'],['104523','Maria Aparecida Souza','Indústria – Moenda',[...S.locais.values()][0]?.nome||'Matriz – Portaria 2']]);
       ws['!cols']=[{wch:12},{wch:34},{wch:24},{wch:28}];const wb=X.utils.book_new();X.utils.book_append_sheet(wb,ws,'Colaboradores');
-      const dl=await claude.use('downloads');if(!dl){toast('Download indisponível nesta visualização.');return}
+      const dl={save:async o=>saveFile(o.filename,o.data)};
       await dl.save({filename:'modelo-colaboradores-kits.xlsx',data:X.write(wb,{type:'array',bookType:'xlsx'})});
     }catch(e){if(e&&e.message==='xlsx')toast('Não foi possível carregar o leitor de Excel. Verifique a conexão.')}
   };
@@ -673,7 +735,7 @@ function vHistorico(){
     $('#hTbl').querySelectorAll('[data-est]').forEach(b=>b.onclick=()=>estornar(b));
   }
   ['hTipo','hLoc','hUsr'].forEach(i=>$('#'+i).onchange=tbl);$('#hQ').oninput=tbl;
-  $('#hCsv').onclick=async()=>{const dl=await claude.use('downloads');if(!dl){toast('Download indisponível nesta visualização.');return}
+  $('#hCsv').onclick=async()=>{const dl={save:async o=>saveFile(o.filename,o.data)};
     const esc=v=>'"'+String(v??'').replace(/"/g,'""')+'"';
     const lines=[['Data','Tipo','Ponto','Destino','Matrícula','Colaborador','Setor','Qtd','Usuário','Login','Observação','Estornada','Sinalização'].join(';')]
       .concat(filt().map(m=>[new Date(m.ts).toLocaleString('pt-BR'),TIPOS[m.tipo],nomeLocal(m.origem),m.destino?nomeLocal(m.destino):'',m.matricula,m.colab,m.setor,m.qtd,nomeUser(m.por,m.porNome),m.porLogin,m.obs,m.estornado?'sim':'',[m.foraLista?'fora da lista':'',m.foraPonto?'previsto em '+nomeLocal(m.foraPonto):''].filter(Boolean).join(', ')].map(esc).join(';')));
@@ -723,7 +785,7 @@ function cUsuarios(head){
    <form id="fU"><div class="row"><label for="uNome">Nome<input id="uNome" required value="${h(ed?.nome)}"></label>
     <label for="uLogin">Login<input id="uLogin" required value="${h(ed?.login)}" ${ed?'disabled':''} autocomplete="off" autocapitalize="none" placeholder="ex.: joao.souza"></label></div>
     <div class="row"><label for="uPerfil">Nível de acesso<select id="uPerfil" required></select></label><label for="uLocal">Ponto de atuação<select id="uLocal"></select></label></div>
-    <label for="uSenha">${ed?'Nova senha (deixe em branco para manter)':'Senha inicial (mín. 6)'}<input id="uSenha" type="password" minlength="6" ${ed?'':'required'} autocomplete="new-password"></label>
+    ${ed?'<p class="note">A senha não é trocada por aqui. Veja docs/FIREBASE.md (seção Senhas).</p>':'<label for="uSenha">Senha inicial (mín. 6)<input id="uSenha" type="password" minlength="6" required autocomplete="new-password"></label>'}
     <div id="uMsg"></div><div class="btns"><button class="btn">${ed?'Salvar':'Criar usuário'}</button>${ed?'<button type="button" class="btn ghost" id="uCancel">Cancelar</button>':''}</div></form></section>
    <section class="panel"><h2>Usuários</h2><div class="tbl" id="uList"></div></section></div>`,[()=>{
     fillSelect($('#uPerfil'),[...S.perfis.values()].map(p=>({v:p.id,t:p.nome})),'Escolha o nível');
@@ -738,14 +800,29 @@ function cUsuarios(head){
   if(ed){$('#uPerfil').value=ed.perfilId||'';$('#uLocal').value=ed.localId||''}
   if($('#uCancel'))$('#uCancel').onclick=()=>{S.editing=null;reSub(cUsuarios,head)};
   $('#fU').onsubmit=async e=>{e.preventDefault();const msg=t=>$('#uMsg').innerHTML=t?`<div class="alert">${t}</div>`:'';
-    const pw=$('#uSenha').value,data={nome:$('#uNome').value.trim(),perfilId:$('#uPerfil').value,localId:$('#uLocal').value||null};
+    const data={nome:$('#uNome').value.trim(),perfilId:$('#uPerfil').value,localId:$('#uLocal').value||null};
     if(!data.perfilId)return msg('Escolha o nível de acesso.');
     if(ed&&ed.id===S.me.id&&data.perfilId!=='admin'&&!S.perfis.get(data.perfilId)?.permissoes?.usuarios)return msg('Você não pode tirar de si mesmo o acesso a usuários.');
-    try{if(pw){data.salt=newSalt();data.hash=await hashPw(pw,data.salt)}
+    const btn=e.target.querySelector('button');btn.disabled=true;
+    try{
       if(ed){await S.db.doc('usuarios/'+ed.id).update(data);toast('Usuário atualizado.')}
-      else{const login=slug($('#uLogin').value);if(login.length<3)return msg('Login precisa ter ao menos 3 letras ou números.');if(S.usuarios.has(login))return msg('Esse login já existe.');
-        await S.db.doc('usuarios/'+login).set({...data,login,ativo:true,criadoEm:Date.now(),criadoPor:S.me.id});toast('Usuário '+login+' criado.')}
-      S.editing=null;reSub(cUsuarios,head)}catch(err){handleWriteErr(err)}};
+      else{
+        const login=slug($('#uLogin').value),pw=$('#uSenha').value;
+        if(login.length<3)return msg('Login precisa ter ao menos 3 letras ou números.');
+        if([...S.usuarios.values()].some(u=>u.login===login))return msg('Esse login já existe.');
+        if(pw.length<6)return msg('A senha precisa ter ao menos 6 caracteres.');
+        // cria a conta de acesso numa instância secundária, sem trocar a sessão do administrador
+        const sec=firebase.initializeApp(FIREBASE_CONFIG,'sec-'+Date.now());
+        let uid;
+        try{const cred=await sec.auth().createUserWithEmailAndPassword(loginToEmail(login),pw);uid=cred.user.uid;await sec.auth().signOut()}
+        finally{await sec.delete()}
+        await S.db.doc('usuarios/'+uid).set({...data,login,uid,ativo:true,criadoEm:Date.now(),criadoPor:S.me.id});
+        toast('Usuário '+login+' criado.');
+      }
+      S.editing=null;reSub(cUsuarios,head);
+    }catch(err){const m=authMsg(err);if(m)msg(m);else handleWriteErr(err)}
+    finally{btn.disabled=false}
+  };
 }
 function cPerfis(head){
   const ed=S.editing&&S.perfis.get(S.editing);
